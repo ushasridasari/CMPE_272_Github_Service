@@ -17,6 +17,7 @@ filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.coverage.run]
 source = ["app"]
+
 branch = true
 omit = ["app/__init__.py"]
 
