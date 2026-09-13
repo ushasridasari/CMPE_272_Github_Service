@@ -9,7 +9,8 @@ info:
     (`GITHUB_OWNER/GITHUB_REPO`) behind a stable, normalised HTTP interface,
     and receives signed GitHub webhooks.
 
-    ### On "delete"
+    ### On "delete"  
+    
     The GitHub REST API has no delete-issue operation. The **D** of CRUD is
     therefore a state transition: `PATCH /issues/{number}` with
     `{"state": "closed"}`. `DELETE /issues/{number}` is offered as an alias
