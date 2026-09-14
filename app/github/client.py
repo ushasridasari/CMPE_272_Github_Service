@@ -1,4 +1,4 @@
-"""Thin async client for the GitHub Issues REST API.
+"""GitHub client and error mapping - done by Sainath
 
 Everything that knows about api.github.com lives here.  Route handlers deal
 only in our own models and our own errors, which is what makes them easy to
