@@ -11,6 +11,12 @@
 - `Makefile`
 - `postman_collection.json`
 - `.github/workflows/ci.yml`
+
+Note:
+The GitHub Actions secret is named `GH_ISSUES_TOKEN` because
+`GITHUB_TOKEN` is reserved by GitHub Actions. The workflow passes
+`GH_ISSUES_TOKEN` into the application as the required `GITHUB_TOKEN`
+environment variable.
   
 # GitHub Issues Gateway
 
@@ -89,7 +95,7 @@ Interactive docs: <http://localhost:8080/docs>
 
 `.env` is gitignored. `.env.example` is committed with placeholders only.
 The service refuses to start if a required variable is missing, which is
-deliberate — failing at boot beats failing on the first request.
+deliberate - failing at boot beats failing on the first request.
 
 ---
 
