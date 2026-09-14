@@ -1,4 +1,6 @@
-"""Persistence for webhook deliveries.
+"""Webhooks and security - Done by Ushasri Dasari
+
+Persistence for webhook deliveries.
 
 SQLite keeps the service single-binary while still surviving a restart, which
 matters because GitHub redelivers on failure and we must not double-process.
