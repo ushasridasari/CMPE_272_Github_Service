@@ -1,4 +1,6 @@
-"""Webhook signature verification.
+"""Webhooks and security - Done by Ushasri Dasari
+
+Webhook signature verification.
 
 Deliberately dependency-free and framework-free so it can be unit tested in
 isolation — this is the security boundary of the service.
