@@ -1,5 +1,4 @@
-""""Done by Jahnavi""""
-"""Issue routes: validation, HTTP semantics and error propagation.
+"""Done by Jahnavi : Issue routes: validation, HTTP semantics and error propagation.
 
 GitHub is mocked with respx throughout, so these run offline and fast.
 """
