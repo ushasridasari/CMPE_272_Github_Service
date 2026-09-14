@@ -1,0 +1,18 @@
+{
+  "action": "opened",
+  "issue": {
+    "number": 42,
+    "title": "Login button is misaligned on mobile",
+    "body": "On iOS Safari the button overlaps the footer.",
+    "state": "open",
+    "html_url": "https://github.com/test-owner/test-repo/issues/42",
+    "user": {"login": "test-owner"},
+    "labels": [{"name": "bug"}, {"name": "ui"}],
+    "comments": 0,
+    "created_at": "2026-09-08T17:04:11Z",
+    "updated_at": "2026-09-08T17:04:11Z",
+    "closed_at": null
+  },
+  "repository": {"full_name": "test-owner/test-repo"},
+  "sender": {"login": "test-owner"}
+}

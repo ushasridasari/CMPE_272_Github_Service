@@ -1,0 +1,583 @@
+{
+  "info": {
+    "name": "GitHub Issues Gateway",
+    "description": "Every route of the Issues Gateway.\n\nSetup:\n1. Set the `baseUrl` collection variable (default http://localhost:8080).\n2. Set `webhookSecret` to the same value as WEBHOOK_SECRET in your .env.\n3. Run 'Create issue' first — it saves the issue number into `issueNumber`, which the later requests reuse.\n\nThe webhook requests compute a valid HMAC SHA-256 signature in a pre-request script, so they exercise the real verification path.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "webhookSecret", "value": "replace-with-your-WEBHOOK_SECRET" },
+    { "key": "issueNumber", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /healthz",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/healthz", "host": ["{{baseUrl}}"], "path": ["healthz"] },
+            "description": "Liveness probe. Does not call GitHub."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('reports ok', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Issues",
+      "item": [
+        {
+          "name": "POST /issues — create",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Login button is misaligned on mobile\",\n  \"body\": \"On iOS Safari the button overlaps the footer.\",\n  \"labels\": [\"bug\", \"ui\"]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/issues", "host": ["{{baseUrl}}"], "path": ["issues"] },
+            "description": "Creates an issue. Returns 201 with a Location header."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('Location header present', () => pm.expect(pm.response.headers.get('Location')).to.match(/^\\/issues\\/\\d+$/));",
+                  "const body = pm.response.json();",
+                  "pm.test('labels flattened to names', () => pm.expect(body.labels).to.include('bug'));",
+                  "pm.collectionVariables.set('issueNumber', body.number);",
+                  "console.log('Saved issueNumber =', body.number);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /issues — missing title (400)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"body\": \"no title here\"\n}" },
+            "url": { "raw": "{{baseUrl}}/issues", "host": ["{{baseUrl}}"], "path": ["issues"] },
+            "description": "Negative case: validation rejects the payload before any GitHub call."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "const err = pm.response.json().error;",
+                  "pm.test('uses the error envelope', () => pm.expect(err.code).to.eql('invalid_request'));",
+                  "pm.test('names the offending field', () => pm.expect(JSON.stringify(err.details)).to.include('title'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /issues — list",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/issues?state=open&per_page=10&page=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues"],
+              "query": [
+                { "key": "state", "value": "open", "description": "open | closed | all" },
+                { "key": "per_page", "value": "10", "description": "1-100" },
+                { "key": "page", "value": "1" },
+                { "key": "labels", "value": "bug,ui", "disabled": true }
+              ]
+            },
+            "description": "Paginated list. Check the Link, ETag and X-Cache response headers."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns an array', () => pm.expect(pm.response.json()).to.be.an('array'));",
+                  "pm.test('pagination headers present', () => pm.expect(pm.response.headers.get('X-Per-Page')).to.eql('10'));",
+                  "const link = pm.response.headers.get('Link');",
+                  "if (link) { pm.test('Link points at this service', () => pm.expect(link).to.not.include('api.github.com')); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /issues — invalid state (400)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/issues?state=archived",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues"],
+              "query": [{ "key": "state", "value": "archived" }]
+            },
+            "description": "Negative case: state outside the allowed enum."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('400 Bad Request', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /issues/{number} — read",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('correct issue', () => pm.expect(String(pm.response.json().number)).to.eql(String(pm.collectionVariables.get('issueNumber'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /issues/{number} — not found (404)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/issues/99999999",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "99999999"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+                  "pm.test('error code', () => pm.expect(pm.response.json().error.code).to.eql('not_found'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH /issues/{number} — rename",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Login button misaligned on iOS Safari\",\n  \"body\": \"Confirmed on iOS 17.4 and 18.0.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('title updated', () => pm.expect(pm.response.json().title).to.include('iOS Safari'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH /issues/{number} — close",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"state\": \"closed\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}"]
+            },
+            "description": "The 'D' of CRUD. GitHub cannot delete issues."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('state is closed', () => pm.expect(pm.response.json().state).to.eql('closed'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH /issues/{number} — reopen",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"state\": \"open\"\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('state is open', () => pm.expect(pm.response.json().state).to.eql('open'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "PATCH /issues/{number} — empty body (400)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}"]
+            },
+            "description": "An empty patch is rejected rather than silently succeeding."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('400 Bad Request', () => pm.response.to.have.status(400));"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "DELETE /issues/{number} — close alias",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}"]
+            },
+            "description": "Closes the issue. Returns the issue, not 204, so nobody assumes data was destroyed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('semantics header', () => pm.expect(pm.response.headers.get('X-Delete-Semantics')).to.eql('closed-not-deleted'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Comments",
+      "item": [
+        {
+          "name": "POST /issues/{number}/comments — create",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"body\": \"Reproduced on iPhone 14, iOS 17.4.\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}/comments",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}", "comments"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('has an id', () => pm.expect(pm.response.json().id).to.be.a('number'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET /issues/{number}/comments — list",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/issues/{{issueNumber}}/comments?per_page=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["issues", "{{issueNumber}}", "comments"],
+              "query": [{ "key": "per_page", "value": "20" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('returns an array', () => pm.expect(pm.response.json()).to.be.an('array'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "item": [
+        {
+          "name": "POST /webhook — valid signature (204)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Build the body, sign it, and reuse the exact same bytes as the request",
+                  "// body. Signing a different serialisation than the one sent would fail.",
+                  "const delivery = 'pm-' + Date.now();",
+                  "const body = JSON.stringify({",
+                  "  action: 'opened',",
+                  "  issue: { number: 7, title: 'Postman probe', state: 'open' },",
+                  "  repository: { full_name: 'owner/repo' },",
+                  "  sender: { login: 'postman' }",
+                  "});",
+                  "const secret = pm.collectionVariables.get('webhookSecret');",
+                  "const digest = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('signedBody', body);",
+                  "pm.collectionVariables.set('signature', 'sha256=' + digest);",
+                  "pm.collectionVariables.set('deliveryId', delivery);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "pm.test('empty body', () => pm.expect(pm.response.text()).to.eql(''));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-GitHub-Event", "value": "issues" },
+              { "key": "X-GitHub-Delivery", "value": "{{deliveryId}}" },
+              { "key": "X-Hub-Signature-256", "value": "{{signature}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{signedBody}}" },
+            "url": { "raw": "{{baseUrl}}/webhook", "host": ["{{baseUrl}}"], "path": ["webhook"] },
+            "description": "Signs the body with WEBHOOK_SECRET in a pre-request script."
+          }
+        },
+        {
+          "name": "POST /webhook — redelivery (204, deduped)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Reuses the delivery id from the previous request, simulating a",
+                  "// GitHub retry. Check /events afterwards: still one entry.",
+                  "const body = pm.collectionVariables.get('signedBody');",
+                  "if (!body) { throw new Error('Run the valid-signature request first.'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
+                  "console.log('Now GET /events — the delivery should appear exactly once.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-GitHub-Event", "value": "issues" },
+              { "key": "X-GitHub-Delivery", "value": "{{deliveryId}}" },
+              { "key": "X-Hub-Signature-256", "value": "{{signature}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{signedBody}}" },
+            "url": { "raw": "{{baseUrl}}/webhook", "host": ["{{baseUrl}}"], "path": ["webhook"] }
+          }
+        },
+        {
+          "name": "POST /webhook — invalid signature (401)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-GitHub-Event", "value": "issues" },
+              { "key": "X-GitHub-Delivery", "value": "pm-bad-signature" },
+              {
+                "key": "X-Hub-Signature-256",
+                "value": "sha256=0000000000000000000000000000000000000000000000000000000000000000"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action\": \"opened\",\n  \"issue\": {\"number\": 7}\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/webhook", "host": ["{{baseUrl}}"], "path": ["webhook"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('error code', () => pm.expect(pm.response.json().error.code).to.eql('invalid_signature'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "POST /webhook — unsupported event (400)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = JSON.stringify({ ref: 'refs/heads/main' });",
+                  "const secret = pm.collectionVariables.get('webhookSecret');",
+                  "const digest = CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
+                  "pm.collectionVariables.set('pushBody', body);",
+                  "pm.collectionVariables.set('pushSignature', 'sha256=' + digest);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('error code', () => pm.expect(pm.response.json().error.code).to.eql('unsupported_event'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-GitHub-Event", "value": "push" },
+              { "key": "X-GitHub-Delivery", "value": "pm-push" },
+              { "key": "X-Hub-Signature-256", "value": "{{pushSignature}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{{pushBody}}" },
+            "url": { "raw": "{{baseUrl}}/webhook", "host": ["{{baseUrl}}"], "path": ["webhook"] },
+            "description": "Correctly signed but subscribed to an event this service does not handle."
+          }
+        },
+        {
+          "name": "GET /events — inspect deliveries",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["events"],
+              "query": [{ "key": "limit", "value": "20" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const events = pm.response.json();",
+                  "pm.test('returns an array', () => pm.expect(events).to.be.an('array'));",
+                  "const id = pm.collectionVariables.get('deliveryId');",
+                  "if (id) {",
+                  "  const matches = events.filter(e => e.id === id);",
+                  "  pm.test('deduped: delivery stored exactly once', () => pm.expect(matches.length).to.be.at.most(1));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

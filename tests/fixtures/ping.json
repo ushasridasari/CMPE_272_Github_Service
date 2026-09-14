@@ -1,0 +1,6 @@
+{
+  "zen": "Non-blocking is better than blocking.",
+  "hook_id": 55512345,
+  "repository": {"full_name": "test-owner/test-repo"},
+  "sender": {"login": "test-owner"}
+}

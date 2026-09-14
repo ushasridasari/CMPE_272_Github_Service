@@ -1,0 +1,51 @@
+# Local development stack.
+#
+#   docker compose up --build            # service only
+#   docker compose --profile tunnel up   # service + public webhook tunnel
+#
+# The tunnel profile is opt-in because it exposes your local machine to the
+# internet; leave it off unless you are actively testing webhook deliveries.
+
+services:
+  gateway:
+    build: .
+    image: issues-gw:latest
+    container_name: issues-gw
+    env_file:
+      - .env
+    environment:
+      # Override the default so the DB lands on the named volume.
+      EVENTS_DB_PATH: /data/events.db
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - events-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Forwards deliveries from a smee.io channel to the gateway, so GitHub can
+  # reach a service running on a laptop with no public IP.
+  #
+  # 1. Open https://smee.io and press "Start a new channel".
+  # 2. Put the channel URL in .env as SMEE_URL.
+  # 3. Use that same URL as the webhook Payload URL in your repo settings.
+  smee:
+    image: deltaprojects/smee-client:latest
+    container_name: issues-gw-smee
+    profiles: ["tunnel"]
+    depends_on:
+      - gateway
+    environment:
+      SMEE_URL: "${SMEE_URL:?Set SMEE_URL in .env to your smee.io channel}"
+    command: >
+      --url ${SMEE_URL}
+      --target http://gateway:8080/webhook
+    restart: unless-stopped
+
+volumes:
+  events-data:

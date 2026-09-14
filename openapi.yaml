@@ -1,0 +1,1060 @@
+openapi: 3.1.0
+
+info:
+  title: GitHub Issues Gateway
+  version: 1.0.0
+  summary: A contract-first HTTP gateway over the GitHub Issues REST API.
+  description: |
+    Wraps the GitHub Issues API for one configured repository
+    (`GITHUB_OWNER/GITHUB_REPO`) behind a stable, normalised HTTP interface,
+    and receives signed GitHub webhooks.
+
+    ### On "delete"
+    The GitHub REST API has no delete-issue operation. The **D** of CRUD is
+    therefore a state transition: `PATCH /issues/{number}` with
+    `{"state": "closed"}`. `DELETE /issues/{number}` is offered as an alias
+    for that close and returns the closed issue rather than `204`, so no
+    caller is misled into thinking data was destroyed.
+
+    ### Authentication
+    Callers of *this* API do not present a GitHub token. The service holds a
+    fine-grained PAT server-side (`GITHUB_TOKEN`) and uses it for every
+    upstream call. The `githubToken` security scheme below documents that
+    server-to-GitHub credential.
+
+    Webhook deliveries authenticate differently: with an HMAC SHA-256
+    signature in `X-Hub-Signature-256`, verified against `WEBHOOK_SECRET`.
+
+    ### Errors
+    Every non-2xx response uses one envelope, the `Error` schema, so a client
+    needs exactly one error branch.
+  contact:
+    name: CMPE 272 — Issues Gateway
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://localhost:{port}
+    description: Local development
+    variables:
+      port:
+        default: "8080"
+        description: Value of the PORT environment variable
+
+tags:
+  - name: issues
+    description: Issue and comment operations proxied to GitHub.
+  - name: webhooks
+    description: Signed inbound deliveries from GitHub, and their audit log.
+  - name: meta
+    description: Operational endpoints.
+
+security:
+  - githubToken: []
+
+paths:
+  /healthz:
+    get:
+      tags: [meta]
+      summary: Liveness probe
+      description: |
+        Returns immediately without contacting GitHub. A health check that
+        depends on a third party flaps when that third party has a bad
+        minute, and orchestrators then restart a healthy process.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              examples:
+                ok:
+                  value:
+                    status: ok
+                    repo: andrewbond/cmpe272-issues-gw
+                    version: 1.0.0
+
+  /issues:
+    post:
+      tags: [issues]
+      summary: Create an issue
+      operationId: createIssue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueCreate"
+            examples:
+              minimal:
+                summary: Title only
+                value:
+                  title: Login button is misaligned on mobile
+              full:
+                summary: Title, body and labels
+                value:
+                  title: Login button is misaligned on mobile
+                  body: On iOS Safari the button overlaps the footer.
+                  labels: [bug, ui]
+      responses:
+        "201":
+          description: Issue created.
+          headers:
+            Location:
+              description: Path of the newly created issue on this service.
+              schema:
+                type: string
+                examples: ["/issues/42"]
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Issue"
+              examples:
+                created:
+                  value:
+                    number: 42
+                    title: Login button is misaligned on mobile
+                    body: On iOS Safari the button overlaps the footer.
+                    state: open
+                    labels: [bug, ui]
+                    html_url: https://github.com/andrewbond/cmpe272-issues-gw/issues/42
+                    user: andrewbond
+                    comments: 0
+                    created_at: "2026-09-08T17:04:11Z"
+                    updated_at: "2026-09-08T17:04:11Z"
+                    closed_at: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+
+    get:
+      tags: [issues]
+      summary: List issues
+      description: |
+        Preserves GitHub's pagination semantics. The `Link` header is
+        rewritten so each URL points back at this service rather than at
+        `api.github.com`, which a client could not call without a token.
+
+        Pull requests are filtered out. GitHub's issues endpoint returns them
+        because they share the issue number space, but they are not issues.
+      operationId: listIssues
+      parameters:
+        - name: state
+          in: query
+          description: Filter by issue state.
+          required: false
+          schema:
+            type: string
+            enum: [open, closed, all]
+            default: open
+        - name: labels
+          in: query
+          description: Comma-separated label names; an issue must carry all of them.
+          required: false
+          schema:
+            type: string
+          examples:
+            single:
+              value: bug
+            multiple:
+              value: bug,ui
+        - name: page
+          in: query
+          description: 1-based page number.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: per_page
+          in: query
+          description: Items per page; GitHub's maximum is 100.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 30
+      responses:
+        "200":
+          description: A page of issues.
+          headers:
+            Link:
+              description: RFC 8288 pagination links, rewritten to this service.
+              schema:
+                type: string
+                examples:
+                  - '<http://localhost:8080/issues?state=open&per_page=30&page=2>; rel="next"'
+            ETag:
+              description: Entity tag; replay it with `If-None-Match` upstream to save rate budget.
+              schema:
+                type: string
+            X-Cache:
+              description: Whether the ETag cache served this response.
+              schema:
+                type: string
+                enum: [HIT, MISS]
+            X-Total-Count:
+              description: Number of items on this page.
+              schema:
+                type: integer
+            X-RateLimit-Remaining:
+              description: GitHub requests left in the current window.
+              schema:
+                type: integer
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Issue"
+              examples:
+                page:
+                  value:
+                    - number: 42
+                      title: Login button is misaligned on mobile
+                      body: On iOS Safari the button overlaps the footer.
+                      state: open
+                      labels: [bug, ui]
+                      html_url: https://github.com/andrewbond/cmpe272-issues-gw/issues/42
+                      user: andrewbond
+                      comments: 2
+                      created_at: "2026-09-08T17:04:11Z"
+                      updated_at: "2026-09-08T18:22:03Z"
+                      closed_at: null
+                empty:
+                  summary: No issues match the filter
+                  value: []
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/UpstreamError"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+
+  /issues/{number}:
+    parameters:
+      - $ref: "#/components/parameters/IssueNumber"
+
+    get:
+      tags: [issues]
+      summary: Get a single issue
+      operationId: getIssue
+      responses:
+        "200":
+          description: The issue.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Issue"
+              examples:
+                found:
+                  value:
+                    number: 42
+                    title: Login button is misaligned on mobile
+                    body: On iOS Safari the button overlaps the footer.
+                    state: open
+                    labels: [bug, ui]
+                    html_url: https://github.com/andrewbond/cmpe272-issues-gw/issues/42
+                    user: andrewbond
+                    comments: 2
+                    created_at: "2026-09-08T17:04:11Z"
+                    updated_at: "2026-09-08T18:22:03Z"
+                    closed_at: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+
+    patch:
+      tags: [issues]
+      summary: Update an issue (rename, edit body, close or reopen)
+      description: |
+        At least one of `title`, `body` or `state` must be present. An empty
+        patch is rejected with `400` rather than silently succeeding, because
+        a no-op that reports success hides client bugs.
+      operationId: updateIssue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IssueUpdate"
+            examples:
+              rename:
+                summary: Rename
+                value:
+                  title: Login button misaligned on iOS Safari
+              close:
+                summary: Close (the "D" of CRUD)
+                value:
+                  state: closed
+              reopen:
+                summary: Reopen
+                value:
+                  state: open
+              editBody:
+                summary: Edit the body
+                value:
+                  body: Confirmed on iOS 17.4 and 18.0.
+      responses:
+        "200":
+          description: The updated issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Issue"
+              examples:
+                closed:
+                  value:
+                    number: 42
+                    title: Login button misaligned on iOS Safari
+                    body: Confirmed on iOS 17.4 and 18.0.
+                    state: closed
+                    labels: [bug, ui]
+                    html_url: https://github.com/andrewbond/cmpe272-issues-gw/issues/42
+                    user: andrewbond
+                    comments: 2
+                    created_at: "2026-09-08T17:04:11Z"
+                    updated_at: "2026-09-08T19:01:44Z"
+                    closed_at: "2026-09-08T19:01:44Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/UpstreamUnavailable"
+
+    delete:
+      tags: [issues]
+      summary: Close an issue (alias — GitHub cannot delete issues)
+      description: |
+        Equivalent to `PATCH {"state": "closed"}`. Returns the closed issue
+        and an `X-Delete-Semantics: closed-not-deleted` header. Idempotent:
+        closing an already-closed issue succeeds.
+      operationId: closeIssue
+      responses:
+        "200":
+          description: The issue, now closed.
+          headers:
+            X-Delete-Semantics:
+              description: Always `closed-not-deleted`.
+              schema:
+                type: string
+                const: closed-not-deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Issue"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /issues/{number}/comments:
+    parameters:
+      - $ref: "#/components/parameters/IssueNumber"
+
+    post:
+      tags: [issues]
+      summary: Add a comment to an issue
+      operationId: createComment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommentCreate"
+            examples:
+              simple:
+                value:
+                  body: Reproduced on iPhone 14, iOS 17.4.
+      responses:
+        "201":
+          description: Comment created.
+          headers:
+            Location:
+              description: Path of the comment collection for this issue.
+              schema:
+                type: string
+                examples: ["/issues/42/comments"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+              examples:
+                created:
+                  value:
+                    id: 2938475610
+                    body: Reproduced on iPhone 14, iOS 17.4.
+                    user: andrewbond
+                    html_url: https://github.com/andrewbond/cmpe272-issues-gw/issues/42#issuecomment-2938475610
+                    created_at: "2026-09-08T18:22:03Z"
+                    updated_at: "2026-09-08T18:22:03Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+    get:
+      tags: [issues]
+      summary: List comments on an issue
+      operationId: listComments
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: per_page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 30
+      responses:
+        "200":
+          description: A page of comments.
+          headers:
+            Link:
+              description: RFC 8288 pagination links, rewritten to this service.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Comment"
+              examples:
+                page:
+                  value:
+                    - id: 2938475610
+                      body: Reproduced on iPhone 14, iOS 17.4.
+                      user: andrewbond
+                      html_url: https://github.com/andrewbond/cmpe272-issues-gw/issues/42#issuecomment-2938475610
+                      created_at: "2026-09-08T18:22:03Z"
+                      updated_at: "2026-09-08T18:22:03Z"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /webhook:
+    post:
+      tags: [webhooks]
+      summary: Receive a GitHub webhook delivery
+      description: |
+        Verifies `X-Hub-Signature-256` (HMAC SHA-256 over the **raw** body,
+        compared in constant time) before parsing or trusting anything.
+
+        Accepts `issues`, `issue_comment` and `ping`. Deliveries are stored
+        under the composite key `(X-GitHub-Delivery, action)` with
+        `INSERT OR IGNORE`, so a GitHub retry or a manual redelivery is a
+        no-op rather than a duplicate. The `204` is written before any
+        follow-on work runs, keeping the ack well inside GitHub's delivery
+        timeout.
+      operationId: receiveWebhook
+      security:
+        - webhookSignature: []
+      parameters:
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          description: Event name.
+          schema:
+            type: string
+            enum: [issues, issue_comment, ping]
+        - name: X-GitHub-Delivery
+          in: header
+          required: true
+          description: Delivery UUID; the primary component of the dedupe key.
+          schema:
+            type: string
+            format: uuid
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          description: "`sha256=` followed by the hex HMAC of the raw body."
+          schema:
+            type: string
+            pattern: "^sha256=[0-9a-f]{64}$"
+      requestBody:
+        required: true
+        description: The raw GitHub event payload.
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookPayload"
+            examples:
+              issueOpened:
+                summary: issues / opened
+                value:
+                  action: opened
+                  issue:
+                    number: 42
+                    title: Login button is misaligned on mobile
+                    state: open
+                  repository:
+                    full_name: andrewbond/cmpe272-issues-gw
+                  sender:
+                    login: andrewbond
+              commentCreated:
+                summary: issue_comment / created
+                value:
+                  action: created
+                  issue:
+                    number: 42
+                  comment:
+                    id: 2938475610
+                    body: Reproduced on iPhone 14.
+                  sender:
+                    login: andrewbond
+              ping:
+                summary: ping sent when the webhook is saved
+                value:
+                  zen: Non-blocking is better than blocking.
+                  hook_id: 55512345
+      responses:
+        "204":
+          description: |
+            Delivery accepted, or recognised as a duplicate and ignored. Both
+            cases return 204 so GitHub's retry logic settles either way.
+        "400":
+          description: Unknown event, unknown action, or malformed JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                unsupportedEvent:
+                  value:
+                    error:
+                      code: unsupported_event
+                      message: Unsupported event type 'push'.
+                unsupportedAction:
+                  value:
+                    error:
+                      code: unsupported_action
+                      message: Unsupported action 'exploded' for event 'issues'.
+        "401":
+          description: Missing, malformed or invalid signature.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                badSignature:
+                  value:
+                    error:
+                      code: invalid_signature
+                      message: Webhook signature verification failed.
+
+  /events:
+    get:
+      tags: [webhooks]
+      summary: List recently processed webhook deliveries
+      description: A debugging aid — the newest deliveries this service stored.
+      operationId: listEvents
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum deliveries to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: Stored deliveries, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WebhookEvent"
+              examples:
+                recent:
+                  value:
+                    - id: 8f2c1e40-9b3a-11f0-8d1e-2f9a7c4b1a55
+                      event: issues
+                      action: opened
+                      issue_number: 42
+                      sender: andrewbond
+                      timestamp: "2026-09-08T17:04:12+00:00"
+                    - id: 91b0aa22-9b3a-11f0-9c77-1d55e2b0f331
+                      event: issue_comment
+                      action: created
+                      issue_number: 42
+                      sender: andrewbond
+                      timestamp: "2026-09-08T18:22:04+00:00"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+components:
+  securitySchemes:
+    githubToken:
+      type: http
+      scheme: bearer
+      bearerFormat: GitHub fine-grained PAT
+      description: |
+        The credential this **service** presents to GitHub, supplied through
+        the `GITHUB_TOKEN` environment variable and never exposed to callers
+        of this API. Documented here because every `/issues*` operation
+        depends on it: without it those routes return `401`.
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: X-Hub-Signature-256
+      description: |
+        HMAC SHA-256 of the raw request body, keyed with `WEBHOOK_SECRET`,
+        rendered as `sha256=<hex>`. Verified with a constant-time compare.
+
+  parameters:
+    IssueNumber:
+      name: number
+      in: path
+      required: true
+      description: GitHub issue number (not the internal database id).
+      schema:
+        type: integer
+        minimum: 1
+      examples:
+        typical:
+          value: 42
+
+  headers:
+    XRequestID:
+      description: Correlation id echoed on every response and present in logs.
+      schema:
+        type: string
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+
+  schemas:
+    Issue:
+      type: object
+      title: Issue
+      description: A GitHub issue, normalised — labels flattened to names.
+      required:
+        [number, title, state, labels, html_url, comments, created_at, updated_at]
+      properties:
+        number:
+          type: integer
+          description: Issue number within the repository.
+          examples: [42]
+        title:
+          type: string
+          examples: [Login button is misaligned on mobile]
+        body:
+          type: [string, "null"]
+          description: Markdown body; null when the issue has none.
+        state:
+          type: string
+          enum: [open, closed]
+        labels:
+          type: array
+          description: Label names only; GitHub's label objects are flattened.
+          items:
+            type: string
+          examples: [[bug, ui]]
+        html_url:
+          type: string
+          format: uri
+        user:
+          type: [string, "null"]
+          description: Login of the issue author.
+        comments:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: [string, "null"]
+          format: date-time
+
+    IssueCreate:
+      type: object
+      title: IssueCreate
+      required: [title]
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 256
+        body:
+          type: [string, "null"]
+        labels:
+          type: [array, "null"]
+          items:
+            type: string
+          description: Label names. Labels absent from the repository are created by GitHub.
+
+    IssueUpdate:
+      type: object
+      title: IssueUpdate
+      description: At least one property is required.
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        title:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 256
+        body:
+          type: [string, "null"]
+        state:
+          type: [string, "null"]
+          enum: [open, closed, null]
+      anyOf:
+        - required: [title]
+        - required: [body]
+        - required: [state]
+
+    Comment:
+      type: object
+      title: Comment
+      required: [id, html_url, created_at]
+      properties:
+        id:
+          type: integer
+          description: Global comment id, unique across the repository.
+          examples: [2938475610]
+        body:
+          type: [string, "null"]
+        user:
+          type: [string, "null"]
+          description: Login of the comment author.
+        html_url:
+          type: string
+          format: uri
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+
+    CommentCreate:
+      type: object
+      title: CommentCreate
+      required: [body]
+      additionalProperties: false
+      properties:
+        body:
+          type: string
+          minLength: 1
+
+    WebhookEvent:
+      type: object
+      title: WebhookEvent
+      description: A stored webhook delivery.
+      required: [id, event, timestamp]
+      properties:
+        id:
+          type: string
+          description: The `X-GitHub-Delivery` UUID.
+        event:
+          type: string
+          enum: [issues, issue_comment]
+        action:
+          type: [string, "null"]
+          examples: [opened, closed, reopened, created]
+        issue_number:
+          type: [integer, "null"]
+        sender:
+          type: [string, "null"]
+        timestamp:
+          type: string
+          format: date-time
+          description: When this service received the delivery (UTC).
+
+    WebhookPayload:
+      type: object
+      title: WebhookPayload
+      description: |
+        GitHub's event body. Only the fields this service reads are described;
+        GitHub sends many more and they are stored verbatim.
+      properties:
+        action:
+          type: string
+        issue:
+          type: object
+          properties:
+            number:
+              type: integer
+            title:
+              type: string
+            state:
+              type: string
+        comment:
+          type: object
+          properties:
+            id:
+              type: integer
+            body:
+              type: string
+        repository:
+          type: object
+          properties:
+            full_name:
+              type: string
+        sender:
+          type: object
+          properties:
+            login:
+              type: string
+        zen:
+          type: string
+          description: Present only on `ping`.
+        hook_id:
+          type: integer
+          description: Present only on `ping`.
+
+    ErrorDetail:
+      type: object
+      title: ErrorDetail
+      required: [message]
+      properties:
+        field:
+          type: [string, "null"]
+          description: Dotted path of the offending field, when one applies.
+        message:
+          type: string
+
+    Error:
+      type: object
+      title: Error
+      description: The single error envelope used by every non-2xx response.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable identifier.
+              enum:
+                - invalid_request
+                - unauthorized
+                - invalid_signature
+                - missing_event_header
+                - unsupported_event
+                - unsupported_action
+                - malformed_payload
+                - forbidden
+                - not_found
+                - rate_limited
+                - upstream_error
+                - upstream_unavailable
+                - http_error
+                - internal_error
+            message:
+              type: string
+              description: Human-readable summary. Never contains a token or signature.
+            details:
+              type: array
+              items:
+                $ref: "#/components/schemas/ErrorDetail"
+
+    Health:
+      type: object
+      title: Health
+      required: [status, repo, version]
+      properties:
+        status:
+          type: string
+          const: ok
+        repo:
+          type: string
+          description: The `owner/repo` this instance is bound to.
+        version:
+          type: string
+
+  responses:
+    BadRequest:
+      description: The request was malformed or failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            missingTitle:
+              summary: Required field absent
+              value:
+                error:
+                  code: invalid_request
+                  message: Request failed validation.
+                  details:
+                    - field: title
+                      message: Field required
+            invalidState:
+              summary: Value outside the allowed enum
+              value:
+                error:
+                  code: invalid_request
+                  message: Request failed validation.
+                  details:
+                    - field: state
+                      message: "Input should be 'open', 'closed' or 'all'"
+            emptyPatch:
+              summary: Patch with no fields
+              value:
+                error:
+                  code: invalid_request
+                  message: Request failed validation.
+                  details:
+                    - field: null
+                      message: >-
+                        Value error, at least one of 'title', 'body' or 'state'
+                        must be provided
+
+    Unauthorized:
+      description: GitHub rejected the server's credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            badToken:
+              value:
+                error:
+                  code: unauthorized
+                  message: >-
+                    GitHub rejected the configured credentials. Check that
+                    GITHUB_TOKEN is set, unexpired, and scoped to this
+                    repository.
+
+    Forbidden:
+      description: The token is valid but lacks the required permission.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            missingScope:
+              value:
+                error:
+                  code: forbidden
+                  message: >-
+                    GitHub denied this request. The token is valid but lacks
+                    'Issues: Read and write' permission on the configured
+                    repository.
+
+    NotFound:
+      description: No such issue in the configured repository.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            noIssue:
+              value:
+                error:
+                  code: not_found
+                  message: The requested issue does not exist in the configured repository.
+
+    RateLimited:
+      description: |
+        GitHub's rate limit is exhausted. `Retry-After` carries the wait,
+        derived from `Retry-After` upstream when present and from
+        `X-RateLimit-Reset` otherwise.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            exhausted:
+              value:
+                error:
+                  code: rate_limited
+                  message: GitHub API rate limit exceeded. Retry after 743s.
+
+    UpstreamError:
+      description: GitHub returned something unexpected.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            unexpected:
+              value:
+                error:
+                  code: upstream_error
+                  message: Unexpected response from GitHub (HTTP 418).
+
+    UpstreamUnavailable:
+      description: GitHub is unreachable or timed out.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            down:
+              value:
+                error:
+                  code: upstream_unavailable
+                  message: GitHub is temporarily unavailable. Please retry shortly.
