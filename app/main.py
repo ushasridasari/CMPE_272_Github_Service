@@ -1,4 +1,3 @@
-"""Done by Jahnavi"""
 """Application entry point.
 
 Builds the ASGI app, installs the request-id middleware, registers the
