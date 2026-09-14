@@ -163,12 +163,18 @@ jobs:
 
       - name: Start the service
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_ISSUES_TOKEN }}
+          # GITHUB_TOKEN is reserved by Actions: the runner injects its own
+          # value and it cannot be overridden here. Pass ours under a
+          # different name and export it in the shell instead.
+          GW_TOKEN: ${{ secrets.GH_ISSUES_TOKEN }}
           GITHUB_OWNER: ${{ vars.GH_ISSUES_OWNER }}
           GITHUB_REPO: ${{ vars.GH_ISSUES_REPO }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           PORT: "8080"
         run: |
+          test -n "$GW_TOKEN" || { echo "GH_ISSUES_TOKEN secret is empty"; exit 1; }
+          echo "token length: ${#GW_TOKEN}, owner: $GITHUB_OWNER, repo: $GITHUB_REPO"
+          export GITHUB_TOKEN="$GW_TOKEN"
           nohup python -m uvicorn app.main:app --host 127.0.0.1 --port 8080 \
             > service.log 2>&1 &
           for i in $(seq 1 30); do
