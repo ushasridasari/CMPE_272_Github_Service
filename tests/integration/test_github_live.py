@@ -1,5 +1,4 @@
 """Integration tests against the real GitHub API and a live service instance.
-"""GitHub client and error mapping - done by Sainath.
 
 Skipped automatically unless ``RUN_INTEGRATION=1`` and real credentials are
 present, so ``make test`` stays green offline and in CI forks.
