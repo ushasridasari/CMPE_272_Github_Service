@@ -1,4 +1,4 @@
-"""Map GitHub API failures onto this service's error model.
+"""GitHub client and error mapping - done by Sainath
 
 Two rules drive everything here:
 
