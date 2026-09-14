@@ -1,3 +1,17 @@
+## Submission files
+
+- `openapi.yaml`
+- `README.md`
+- `DESIGN.md`
+- `tests/unit/`
+- `tests/integration/`
+- `tests/fixtures/`
+- `Dockerfile`
+- `docker-compose.yaml`
+- `Makefile`
+- `postman_collection.json`
+- `.github/workflows/ci.yml`
+  
 # GitHub Issues Gateway
 
 A contract-first HTTP service that wraps the GitHub Issues REST API for a
@@ -36,7 +50,8 @@ suite at 98% line coverage, a Docker image, and CI.
 ## Quick start
 
 ```bash
-git clone <your-repo-url> && cd issues-gw
+git clone <your-repo-url>
+cd CMPE_272_Github_Service
 
 cp .env.example .env
 make secret                 # generate a WEBHOOK_SECRET, paste it into .env
@@ -88,7 +103,7 @@ Create a **fine-grained** PAT at
    (*Metadata: Read* is added automatically and is required.)
 3. Nothing else. That is the entire scope this service uses.
 
-Verify before writing any code:
+Verify the token before starting the service:
 
 ```bash
 source .env
