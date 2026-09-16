@@ -1,5 +1,5 @@
 """Application error types.
-
+Done By Sainath
 Every failure the client can see is expressed as an :class:`AppError`.
 Handlers registered in ``app.main`` turn these into the single error
 envelope documented in ``openapi.yaml``::
